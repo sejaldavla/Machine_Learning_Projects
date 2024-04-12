@@ -1,0 +1,308 @@
+---
+title: "Sleep Health Lifestyle"
+author: "Sejal Davla, PhD"
+format: html
+editor: visual
+---
+
+## What Influences Sleep? Implementing Supervised Machine Learning using K-Nearest Neighbors
+
+What Influences Sleep? Implementing Supervised Machine Learning using K-Nearest Neighbors Sleep is an important biological and lifestyle factor with massive influence on human health. Chronic sleep deprivation and sleep disorders are associated with numerous diseases, including diabetes, cardiovascular diseases, cancer, etc.
+
+Since sleep anomalies cause many physiological changes, we can use parameters such as heart rate, BMI, blood pressure, and other indicators to predict if they help predict sleep disorders.
+
+## Objective
+
+To predict the presence of a sleep disorder based on the other columns in the dataset. This synthetic dataset contains sleep and cardiovascular metrics as well as lifestyle factors of close to 400 fictive persons.
+
+Data Source: \[Kaggle\](https://www.kaggle.com/datasets/uom190346a/sleep-health-and-lifestyle-dataset/)
+
+```{r}
+# Required packages
+library(tidyverse)
+library(here)
+library(janitor)
+library(patchwork)
+library(tidymodels)
+library(themis)
+```
+
+```{r}
+data <- read_csv(here("Sleep_health_and_lifestyle_dataset.csv"), 
+                 show_col_types = FALSE,
+                 name_repair = janitor::make_clean_names)
+str(data)
+```
+
+## Understanding Data Structure
+
+```{r}
+sum(is.na(data)) # No NA values 
+colnames(data)
+unique(data$blood_pressure)
+unique(data$gender)
+unique(data$occupation)
+unique(data$bmi_category)
+unique(data$sleep_disorder)
+```
+
+The blood pressure column shows both systolic and diastolic pressure. Create new columns and split the data. Used this chart to encode blood pressure:https://www.bloodpressureuk.org/your-blood-pressure/understanding-your-blood-pressure/what-do-the-numbers-mean/
+
+```{r}
+sleep_health <- data |>
+  separate(blood_pressure,c("systolic","diastolic")) |>
+  mutate(blood_pressure = 
+           case_when(
+             systolic %in% 115:121 & diastolic %in% 75:89 ~ "Normal",
+             systolic %in% 120:139 & diastolic %in% 80:89 ~ "Elevated",
+             systolic %in% 120:139 & diastolic >= 90 ~ "High",
+             systolic >= 140 & diastolic >= 90 ~ "High"
+           )) |>
+  mutate(bmi_category = str_replace(bmi_category,"Normal Weight", "Normal")) |>
+  mutate(occupation = str_replace(occupation, "Sales Representative", "Salesperson"))
+```
+
+## Visualize data distribution
+
+One of the most important aspect of data analysis is sampling. To ask right questions, it is imperative to see data distribution for each parameter and determine factors that could bias the analysis. Here, we will check data sampling based on human factors such as age, gender, occupation, etc.
+
+```{r}
+Distribution <- sleep_health |>
+  select(age, gender, occupation) |>
+  group_by(age, gender, occupation) |>
+  summarise(total = n())
+Distribution
+```
+
+```{r}
+p1 <- Distribution |>
+  ggplot(aes(age, y = total)) +
+  geom_col(aes(fill = gender)) +
+  labs(y = "Number of people") +
+  theme_classic()
+p1
+```
+
+```{r}
+p2 <- Distribution |>
+  ggplot(aes(age, y = total)) +
+  geom_col(aes(fill = gender), color = "grey") +
+  facet_wrap(~ occupation) +
+  theme_bw()
+p2
+```
+
+## Assessing sleep quality and quantity across the subjects
+
+Is there a relationship between sleep quality and quantity?
+
+```{r}
+qual_quant <- sleep_health |>
+  ggplot(aes(x = quality_of_sleep, y = sleep_duration)) +
+  geom_point(aes(color = gender), 
+             alpha = 0.5, 
+             size = 2.5,
+             position = position_jitter()) +
+  geom_smooth(aes(color = gender)) +
+  labs(x = "Sleep Quality on a Scale of 1-10",
+       y = "Sleep Duration in Hours") +
+  scale_y_binned(limits = c(5.5, 9.0),
+                 breaks = seq(5.5, 9.0, 0.5)) +
+  theme_bw()
+qual_quant
+```
+
+Does sleep quality or quantity change for different occupation? There is one subject in manager occupation. Remove it from the visualization.
+
+```{r}
+occ_1 <- sleep_health |>
+  filter(occupation != "Manager") |>
+  ggplot(aes(x = occupation, y = sleep_duration)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_point(aes(color = gender),
+             alpha = 0.5,
+             size = 2.5,
+             position = position_jitter()) +
+  labs(x = "",
+       y = "Sleep Duration in Hours") +
+  scale_y_continuous(limits = c(5.5, 9.0),
+                     breaks = seq(5.5, 9.0, 0.5)) +
+  theme_classic()
+occ_1
+
+ggsave("occ_1.png", width = 10, height = 8, dpi = 300)
+```
+
+```{r}
+occ_2 <- sleep_health |>
+  filter(occupation != "Manager") |>
+  ggplot(aes(x = occupation, y = quality_of_sleep)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_point(aes(color = gender),
+             alpha = 0.5,
+             size = 2.5,
+             position = position_jitter()) +
+  theme_classic()
+occ_2
+```
+
+```{r}
+age_sleep <- sleep_health |>
+  ggplot(aes(age, sleep_duration)) +
+  geom_point(aes(color = sleep_disorder, shape = gender),
+             alpha = 0.7,
+             stroke = 2,
+             position = position_jitter()) +
+  theme_classic()
+age_sleep
+```
+
+```{r}
+age_quality <- sleep_health |>
+  ggplot(aes(age, factor(quality_of_sleep))) +
+  geom_point(aes(color = sleep_disorder, shape = gender),
+             position = position_jitter()) +
+  theme_classic()
+age_quality 
+```
+
+## Predicting sleep disorder using kNN classifier
+
+```{r}
+sleep_health$systolic <- as.numeric(sleep_health$systolic)
+sleep_health$diastolic <- as.numeric(sleep_health$diastolic)
+
+set.seed(500)
+
+split <- initial_split(sleep_health, prop = 3/4, strata = sleep_disorder)
+
+sleep_health_train <- split |>
+  training()
+
+sleep_health_test <- split |>
+  testing()
+
+dim(sleep_health_train)
+dim(sleep_health_test)
+
+train_index <- as.integer(rownames(sleep_health_train))
+test_index <- as.integer(rownames(sleep_health_test))
+```
+
+```{r}
+# Feature engineering and data preparation for modeling
+sleep_recipe <- recipe(sleep_disorder ~ ., data = sleep_health_train) |>
+  step_downsample(sleep_disorder) |> 
+  step_dummy() |>
+  #normalize and scale data
+  step_center(all_numeric_predictors()) |>
+  step_scale(all_numeric_predictors()) |>
+  step_BoxCox() |>
+  prep()
+```
+
+```{r}
+# Apply recipe to the training data
+sleep_juiced <- juice(sleep_recipe)
+
+# Visualize the processed data
+tidy1 <- sleep_juiced |>
+  pivot_longer(-c(sleep_disorder, gender, occupation, bmi_category, blood_pressure)) |>
+  ggplot() +
+  geom_histogram(aes(value, fill = sleep_disorder)) +
+  facet_wrap(~ name, ncol = 5, scales = "free_x") +
+  theme_bw()
+tidy1
+```
+
+```{r}
+#bake the test data
+sleep_baked <- bake(sleep_recipe, new_data = sleep_health_test)
+```
+
+```{r}
+# knn specification
+knn_spec <- nearest_neighbor() |>
+  set_engine("kknn") |>
+  set_mode("classification")
+
+# fit the model
+sleep_knn <- knn_spec |>
+  fit(sleep_disorder ~ ., data = sleep_juiced)
+
+sleep_knn
+```
+
+```{r}
+# Evaluate the model
+sleep_knn |>
+  predict(sleep_baked) |>
+  bind_cols(sleep_baked) |>
+  metrics(truth = sleep_disorder, estimate = .pred_class)
+
+sleep_knn |>
+  predict(sleep_juiced) |>
+  bind_cols(sleep_juiced) |>
+  metrics(truth = sleep_disorder, estimate = .pred_class)
+```
+
+The model evaluates training data with 88% accuracy and testing data with 94% accuracy.
+
+# Graph model evaluation
+
+```{r}
+ # model prediction for the training set
+knn_result <- sleep_knn |>
+  predict(sleep_juiced) |>
+  mutate(truth = sleep_juiced$sleep_disorder) |>
+  mutate(accuracy = if_else(.pred_class == truth, "yes","no"))
+
+p3 <- knn_result |>
+  ggplot(aes(x = accuracy)) +
+  geom_bar(aes(fill = accuracy)) +
+  labs(title = "Model prediction on training data - 88% accuracy",
+       y = "observations") +
+  theme_bw()
+p3
+```
+
+```{r}
+ # model prediction for the test set
+knn_result_test <- sleep_knn |>
+  predict(sleep_baked) |>
+  mutate(truth = sleep_baked$sleep_disorder) |>
+  mutate(accuracy = if_else(.pred_class == truth, "yes","no"))
+
+p4 <- knn_result_test |>
+  ggplot(aes(x = accuracy)) +
+  geom_bar(aes(fill = accuracy)) +
+  labs(title = "Model prediction on testing data - 94% accuracy",
+       y = "Observations") + 
+  theme_bw() 
+p4
+```
+
+```{r}
+p5 <- p3 + p4 + plot_layout(guides = "collect")
+
+ggsave("p5.png", width = 10, height = 6, dpi = 300)
+```
+
+```{r}
+# Probability for predicted values
+sleep_knn |>
+  predict(sleep_juiced, type = "prob") |>
+  bind_cols(sleep_juiced) |>
+  rename(.pred_Sleep_Apnea = ".pred_Sleep Apnea") |>
+  gain_curve(sleep_disorder, .pred_Insomnia:.pred_Sleep_Apnea) |>
+  autoplot()
+```
+
+```{r}
+sleep_knn |>
+  predict(sleep_juiced, type = "prob") |>
+  bind_cols(sleep_juiced) |>
+  rename(.pred_Sleep_Apnea = ".pred_Sleep Apnea") |>
+  roc_curve(sleep_disorder, .pred_Insomnia:.pred_Sleep_Apnea) |>
+  autoplot()
+```
