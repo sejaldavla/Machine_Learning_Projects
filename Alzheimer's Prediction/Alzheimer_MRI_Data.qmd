@@ -1,0 +1,443 @@
+---
+title: "Predicting Alzheimer's Disease using Socioeconomic and MRI Imaging Data from Demented and Nondemented Adults"
+subtitle: "Applying Random Forest machine learning algorithm to classify Alzheimer's patients"
+author: "Sejal Davla, PhD"
+format: html
+theme: cerulean
+---
+
+#### Project overview
+
+The **Open Access Series of Imaging Studies (OASIS)** is a project aimed at making neuroimaging data sets of the brain freely available to the scientific community. This freely avilable neuroimaging longitudinal data consists of **150 subjects aged 60 to 96**. Each subject was scanned on two or more visits, separated by at least one year for a total of 373 imaging sessions on T1-weighted MRI scanner. 72 of the subjects were characterized as nondemented throughout the study. 64 of the subjects were characterized as demented at the time of their initial visits and remained so for subsequent scans. Another 14 subjects were characterized as nondemented at the time of their initial visit and were subsequently characterized as demented at a later visit.
+
+The data contains the following attributes:
+
+| Column name    | Information                                                                                                                                                                                                                                                           |
+|---------------------|---------------------------------------------------|
+| **Subject.ID** | Unique ID of the patient                                                                                                                                                                                                                                              |
+| **MRI.ID**     | Unique Id generated after conducting MRI on patient (This information combines subject ID with visit number, therefore **it was removed from the analysis**)                                                                                                          |
+| **Group**      | Includes three subject categories. i) **Nondemented** (Normal), ii) **Demented** (Patients with mild to severe dementia), and iii) **Converted** (Previously Normal but developed dementia later)                                                                     |
+| **Visit**      | Number of follow-up visit for each MRI scan                                                                                                                                                                                                                           |
+| **MR.Delay**   | The number of day between two medical visits                                                                                                                                                                                                                          |
+| **M.F**        | Gender (The column was renamed to gender for better readability)                                                                                                                                                                                                      |
+| **Hand**       | Handedness (All subjects are right-handed so **the column was removed from the analysis**)                                                                                                                                                                            |
+| **Age**        | Age in years                                                                                                                                                                                                                                                          |
+| **EDUC**       | Years of education (This column was renamed as education)                                                                                                                                                                                                             |
+| **SES**        | Socioeconomic status assessed by the Hollingshead Index of Social Position (**1 = highest status to 5 = lowest status**)                                                                                                                                              |
+| **MMSE**       | [Mini-Mental State Examination score](https://www.healthdirect.gov.au/mini-mental-state-examination-mmse#:~:text=GP%20or%20specialist.-,How%20is%20the%20MMSE%20scored%3F,abnormal%2C%20indicating%20possible%20cognitive%20impairment.) (**0 = worst to 30 = best**) |
+| **CDR**        | [Clinical Dementia Rating](https://www.sciencedirect.com/topics/medicine-and-dentistry/clinical-dementia-rating) **(0 = no dementia, 0.5 = very mild AD, 1 = mild AD, 2 = moderate AD)**                                                                              |
+| **eTIV**       | Estimated total intracranial volume (mm^3^)                                                                                                                                                                                                                           |
+| **nWBV**       | Normalized whole-brain volume                                                                                                                                                                                                                                         |
+| **ASF**        | Atlas scaling factor (unitless). Calculated by transforming native-space brain and skull to the atlas target                                                                                                                                                          |
+
+#### 1. Data Cleaning and Preprocessing
+
+```{r warning=FALSE, message=FALSE}
+
+# required packages
+library(tidyverse)
+library(janitor)
+library(here)
+library(GGally)
+library(purrr)
+library(patchwork)
+library(ggpubr)
+library(rstatix)
+library(BiocompR)
+library(randomForest)
+```
+
+```{r warning=FALSE, message=FALSE}
+
+# load data
+df <- read_csv(here("oasis.csv")) |>
+  clean_names() |>
+  select(-c(hand, mri_id)) |>
+  rename(gender = m_f) 
+```
+
+##### 1.1 Missing data
+
+```{r}
+
+# columnwise summary of missing (NA) values
+colSums(is.na(df))
+
+# extract rows with NA values
+NA_rows <- df[!complete.cases(df), ]
+
+# count the number of subjects with missing data
+unique(NA_rows$subject_id)
+```
+
+Out of 150 subject data, 8 subject data has NA values in the ses (socioeconomic status), mmse (mini mental examination score) columns. Because there are enough data points in the analysis, rows with missing ses and mmse values were removed from the analysis **instead of imputing mean or median values**. This strengthens data modeling without diminishing statistical power.
+
+```{r}
+
+# remove data with missing values
+df_new <- df[complete.cases(df), ]
+
+# check missing values in the new dataframe
+colSums(is.na(df_new)) # there are no NA values
+```
+
+##### 1.2 Correct data entry errors in text
+
+```{r}
+
+# check unique values in character strings
+df_new |>
+  select(-subject_id) |>
+  select_if(is.character) |>
+  map(unique)
+```
+
+There are discrepancies in how data was entered in group and gender columns.
+
+```{r}
+
+# data cleaning
+df_new <- df_new |>
+  mutate(group = str_replace(group, "Non-demented", "Nondemented")) |>
+  mutate(gender = str_to_upper(gender))
+```
+
+##### 1.3 Data reformatting for downstream analysis
+
+```{r}
+
+# convert as factor
+df_new$gender <- as.factor(df_new$gender)
+df_new$group <- as.factor(df_new$group)
+df_new$visit <- as.factor(df_new$visit)
+df_new$ses <- as.factor(df_new$ses)
+df_new$cdr <- as.factor(df_new$cdr)
+```
+
+#### 2. Perform Univariate and Bivariate Exploratory Data Analysis
+
+There are two objectives for performing exploratory data analysis. First is to explore data distribution and understand if specific variables are under- or over-represented in the dataset. Second objective is to determine relationship between variables that will help make assumptions in the modeling step.
+
+##### 2.1 Do gender and sex play a role in dementia diagnosis?
+
+```{r warning=FALSE, message=FALSE, out.width="80%"}
+
+P1 <- df_new |>
+    mutate(group = fct_relevel(group, c("Demented", "Nondemented", "Converted"))) |>
+  ggplot(aes(x = gender, fill = gender)) +
+  geom_bar(alpha = 0.7, width = 0.9) +
+  facet_wrap(~group) +
+  scale_y_continuous(limits = c(0, 150),
+                     breaks = seq(0, 150, 25)) +
+  scale_x_discrete(labels = c("Female", "Male")) +
+  coord_cartesian(expand = FALSE,
+                  clip = "off") + 
+  labs(x = "Gender",
+       y = "Number of Individuals",
+       title = "Men are more likely to have dementia than women") +
+  theme_classic() +
+  theme(strip.background = element_blank(),
+        strip.text = element_text(size = 12),
+        axis.text = element_text(size = 10),
+        axis.line = element_blank(),
+        axis.ticks = element_blank(),
+        panel.grid.major.y = element_line(color = "grey90", size = 0.5),
+        panel.background = element_rect(fill = NA, color = "grey90"),
+        legend.position = "none")
+
+P2 <- df_new |>
+  group_by(gender, group) |>
+  summarise(count = n()) |>
+  mutate(prop = count / sum(count)) |>
+  mutate(group = fct_relevel(group, c("Demented", "Nondemented", "Converted"))) |>
+  ungroup() |>
+  ggplot(aes(x = count, y = gender, fill = group)) +
+  geom_col(width = 0.5, alpha = 0.7) +
+  coord_cartesian(expand = FALSE) +
+  scale_y_discrete(labels = c("Female", "Male")) +
+  labs(x = "",
+       y = "",
+       fill = "") +
+  theme_classic() +
+  theme(axis.line = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = "top",
+        axis.text = element_text(size = 12),
+        legend.text = element_text(size = 10)) 
+
+P1 / P2
+```
+
+```{r warning=FALSE, message=FALSE}
+df_new |>
+  select(group, gender, age) |>
+  ggcraviola(craviola.width = 0.1,
+             lines.col = "grey30",
+             bins.quantiles = seq(0.25, 0.75, 0.25)) +
+  scale_fill_manual(values = c("M" = "#00BFC4",
+                                "F" = "#F8766D")) +
+  labs(title = "There is no obvious relationship between age/sex and dementia diagnosis") +
+  theme_classic() +
+  theme(axis.title.x = element_blank(),
+        axis.line = element_line(size = 0.1, color = "grey30"),
+        axis.text = element_text(size = 10),
+        axis.title = element_text(size = 12))
+```
+
+##### 2.2 Are there differences in cognitive test perfromance in demented vs non-demented individuals?
+
+```{r out.width="80%"}
+
+df_new |>
+  select(group, mmse, cdr) |>
+  mutate(group = fct_relevel(group, c("Demented", "Nondemented", "Converted"))) |>
+  ggplot(aes(x = group, y = mmse)) +
+  geom_point(aes(color = cdr), alpha = 0.7, size = 2.5, position = position_jitter(width = 0.2)) +
+  geom_boxplot(fill = "grey90", width = 0.25, outlier.shape = NA, alpha = 0.5) +
+  scale_color_discrete(labels = c("No dementia", "very mild Alzheimer's", "mild Alzheimer's", "moderate Alzheimer's")) +
+  coord_flip() +
+  labs(x = "",
+       y = "Mini-Mental State Examination Score (MMSE)",
+       title = "Nondemented individuals have higher MMSE score compared to Dementia patients",
+       color = "Clinical Dementia Rating") +
+  theme_classic() +
+  theme(plot.title = element_text(size = 12),
+        plot.title.position = "plot",
+        axis.title.y = element_blank(),
+        axis.ticks = element_blank(),
+        axis.line = element_blank(),
+        axis.text = element_text(size = 12),
+        axis.title.x = element_text(size = 12),
+        panel.grid.major.y = element_line(color = "grey90", linewidth = 0.5),
+        legend.position = "top",
+        legend.text = element_text(size = 10)) +
+  guides(color = guide_legend(ncol = 2,override.aes = list(size = 5))) 
+
+```
+
+##### 2.3 Do education and socioeconomic status contribute to dementia?
+
+```{r fig.height=7, fig.width=5}
+
+P3 <- df_new |>
+  select(group, educ, cdr) |>
+  mutate(group = fct_relevel(group, c("Demented", "Nondemented", "Converted"))) |>
+  ggplot(aes(x = group, y = educ)) +
+  geom_point(aes(color = cdr), alpha = 0.7, size = 2, position = position_jitter(width = 0.2)) +
+  geom_boxplot(fill = "grey90", width = 0.25, outlier.shape = NA, alpha = 0.5) +
+  scale_color_discrete(labels = c("No dementia", "very mild Alzheimer's", "mild Alzheimer's", "moderate Alzheimer's")) +
+  coord_flip() +
+  labs(x = "",
+       y = "Education (in years)",
+       color = "Clinical Dementia Rating") +
+  theme_classic() +
+  theme(axis.title.y = element_blank(),
+        axis.ticks = element_blank(),
+        axis.line = element_blank(),
+        axis.text = element_text(size = 8),
+        axis.title.x = element_text(size = 10),
+        panel.grid.major.y = element_line(color = "grey90", linewidth = 0.5),
+        legend.position = "top",
+        legend.text = element_text(size = 8),
+        legend.title = element_text(size = 8)) +
+  guides(color = guide_legend(ncol = 2,override.aes = list(size = 5))) 
+
+
+P4 <- df_new |>
+  select(group, ses, cdr) |>
+  mutate(group = fct_relevel(group, c("Demented", "Nondemented", "Converted"))) |>
+  ggplot(aes(x = group, y = ses)) +
+  geom_point(aes(color = cdr), alpha = 0.7, size = 2, position = position_jitter(width = 0.2)) +
+  scale_color_discrete(labels = c("No dementia", "very mild Alzheimer's", "mild Alzheimer's", "moderate Alzheimer's")) +
+  coord_flip() +
+  labs(x = "",
+       y = "Socioeconomic status - Low (1) to High (5)",
+       color = "Clinical Dementia Rating") +
+  theme_classic() +
+  theme(axis.title.y = element_blank(),
+        axis.ticks = element_blank(),
+        axis.line = element_blank(),
+        axis.text = element_text(size = 8),
+        axis.title.x = element_text(size = 10),
+        panel.grid.major.y = element_line(color = "grey90", linewidth = 0.5),
+        legend.position = "top",
+        legend.text = element_text(size = 8),
+        legend.title = element_text(size = 8)) +
+  guides(color = guide_legend(ncol = 2,override.aes = list(size = 5))) 
+
+P3 / P4 +
+  plot_annotation(title = "Education and Scoioeconomic status has no impact \non Clinical Dementia Rating",
+                  theme = theme(legend.position = "top",
+                                plot.title = element_text(size = 15))) +
+  plot_layout(guides = "collect")
+
+```
+
+##### 2.4 Does MRI brain volume vary between demented and non-demented individuals?
+
+```{r fig.height=8, fig.width=6}
+
+# test data distribution pattern 
+# shapiro.test(df_new$e_tiv) # data not normally distributed
+# shapiro.test(df_new$n_wbv) # data normally distributed
+
+# perform ANOVA on intracranial volume data
+stat.test <- df_new |>
+  dunn_test(e_tiv ~ group)
+
+# perform ANOVA on total brain volume data
+stat.test1 <- df_new |>
+  tukey_hsd(n_wbv ~ group) |>
+  add_xy_position(x = "group", dodge = 0.8)
+
+P5 <- df_new |>
+  select(group, e_tiv) |>
+  mutate(group = fct_relevel(group, c("Demented", "Nondemented", "Converted"))) |>
+  ggplot(aes(x = group, y = e_tiv, fill = group)) +
+  geom_point(color = "grey30", alpha = 0.5, size = 2, position = position_jitter(width = 0.1)) +
+  geom_boxplot(width = 0.25, outlier.shape = NA, alpha = 0.5) +
+  scale_y_continuous(limits = c(1000,2250),
+                     breaks = seq(1000, 2250,250)) +
+  labs(y = "Estimated total intracranial volume") +
+  theme_classic() +
+  theme(axis.title.x = element_blank(),
+        axis.ticks = element_blank(),
+        axis.line = element_blank(),
+        axis.text = element_text(size = 12),
+        axis.title.y = element_text(size = 12),
+        panel.grid.major.y = element_line(color = "grey90", linewidth = 0.5),
+        legend.position = "none") +
+  stat_kruskal_test(group.by = "x.var", label = "p = {p.signif}")
+
+P6 <- df_new |>
+  select(group, n_wbv) |>
+  mutate(group = fct_relevel(group, c("Demented", "Nondemented", "Converted"))) |>
+  ggplot(aes(x = group, y = n_wbv)) +
+  geom_point(color = "grey30", alpha = 0.5, size = 2, position = position_jitter(width = 0.1)) +
+  geom_boxplot(aes(fill = group), width = 0.25, outlier.shape = NA, alpha = 0.5) +
+  labs(y = "Normalized whole brain volume") +
+  theme_classic() +
+  theme(axis.title.x = element_blank(),
+        axis.ticks = element_blank(),
+        axis.line = element_blank(),
+        axis.text = element_text(size = 12),
+        axis.title.y = element_text(size = 12),
+        panel.grid.major.y = element_line(color = "grey90", linewidth = 0.5),
+        legend.position = "none") +
+  stat_pvalue_manual(stat.test1, label = "p.adj.signif", hide.ns = TRUE, tip.length = 0.01, step.increase = 0.1)
+
+P5 / P6 +
+    plot_annotation(title = "There is no difference in estimated intracranial volume and \nnomrmalized whole brain volume between dementia \npatients and non-dementia individuals",
+                    theme = theme(plot.title = element_text(size = 15)))
+```
+
+##### 2.5 Are there variables that show linear relationship or correlation?
+
+We measure correlation between variables. The correlation matrix suggests weak or no correlation between numericals variables.
+
+\*There is a strong negative correlation between estimated total intracranial volume (eTIV) and Atlas Scaling Factor (ASF). The ***ASF*** is a one-parameter scaling factor that allows for comparison of the estimated total intracranial volume (***eTIV***) based on differences in human brain volume, therefore, the correlation is expected and not meaningful for the analysis. **I will drop ASF from the modeling to avoid multicolinearity.**
+
+```{r warning=FALSE, message=FALSE}
+
+# correlation matrix
+ggcorr(df_new,
+       label = TRUE,
+       legend.size = 10)
+```
+
+##### 2.6 Conclusion I
+
+Based on the exploratory data analysis, we derive the following conclusions.
+
+1.  Men are more likely to have dementia.
+2.  There is no obvious relationship between age/sex and dementia diagnosis.
+3.  Non-demented individuals have higher MMSE score compared to Dementia patients.
+4.  Education and Scoioeconomic status has no impact on Clinical Dementia Rating.
+5.  There is no difference in estimated intracranial volume and normalized whole brain volume between dementia patients and non-dementia individuals.
+6.  There is no correlation between MMSE score and estimated intracranial volume/normalized whole brain volume
+
+#### 3. Random Forest Classification Model
+
+Based on the given data, can we predict dementia and Alzheimer's disease? This is a classification problem. We will employ decision tree which is a supervised learning algorithm to predict Alzheimer's disease based on socioeconomic factors.
+
+```{r}
+
+# create a dataframe without asf for modeling
+model_data <- df_new |>
+  select(-asf)
+
+# partition data into training and testing sets
+set.seed(500)
+ind <- sample(2, nrow(model_data), replace = T, prob = c(0.8, 0.2))
+train <- df_new[ind == 1, ]
+test <- df_new[ind == 2, ]
+```
+
+```{r}
+
+# create a random forest model
+rf <- randomForest(group ~., 
+                   data=train, 
+                   proximity=TRUE,
+                   importance=TRUE,
+                   predicted = TRUE) 
+print(rf)
+```
+
+```{r}
+
+# cross-validate model on test data
+test_pred <- predict(rf,
+                    newdata = test)
+
+# print model accuracy
+accuracy <- mean(test_pred == test$group)*100
+cat('Accuracy on testing data: ', round(accuracy, 2), '%',  sep='')
+```
+
+```{r}
+
+plot(rf, main = "Model Error by Number of Trees") 
+legend(x = "right",
+       legend = colnames(rf$err.rate),
+       fill = 1:ncol(rf$err.rate))
+```
+
+```{r}
+
+# plot model accuracy as a heatmap
+
+pred <- as.data.frame(predict(rf))
+
+a <- train |>
+  cbind(pred) |>
+  group_by(group, predict(rf)) |>
+  summarise(n = n()) |>
+  mutate(freq = n/sum(n)) |>
+  ungroup() |>
+  rename("predict" = "predict(rf)") |>
+  mutate(percent = round(freq, digits = 2) * 100)
+
+a |>
+  ggplot(aes(x = group, y = predict)) +
+  geom_tile(aes(fill = percent), color = "grey70") +
+  geom_text(aes(label = paste0(percent,"%"))) +
+  scale_fill_gradient(low = "white", high = "#6488ea") +
+  labs(x = "Actual Diagnosis",
+       y = "Model prediction",
+       title = "Model prediction accuracy") +
+  theme_classic() +
+  theme(axis.line = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = "top")
+  
+```
+
+```{r}
+
+varImpPlot(rf, main = "Importance of variables")
+```
+
+##### 3.1 Conclusion II
+
+The Random Forest model shows great accuracy in predicting Alzheimer's disease diagnosis based on socioeconomic and brain imaging data. Among all the variables, clinical dementia rating (CDR) and mini-mental state examination score show greater reliability in accurately predicting dementia. While the prediction accuracy is 98% in classifying demented and nondemented individuals, the model performance reflects well on the data for converted patients. It is difficult to diagnose dementia in individuals when their CDR and MMSE scores do not suggest any cognitive decline. While Alzheimer's is a complex disease, features such as CDR and MMSE can be valuable in timely diagnosis.
